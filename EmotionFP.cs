@@ -11,38 +11,81 @@ using SixLabors.ImageSharp.Processing;
 using static System.Net.Mime.MediaTypeNames;
 using Image = SixLabors.ImageSharp.Image;
 using System.Threading.Tasks.Dataflow;
+using System.Collections;
 
 namespace NuGetEmotionFP
 {
     public class EmotionFP : IDisposable
     {
         private InferenceSession session;
-        private BufferBlock<Image<Rgb24>> input = new BufferBlock<Image<Rgb24>>();
-        private object obj = new object();
+        private BufferBlock<ToTransform> input = new BufferBlock<ToTransform>();
+        private TransformBlock<ToTransform, ToAction> ImgTransform;
+        private ActionBlock<ToAction> ImgAction;
+        private struct ToTransform
+        {
+            public Image<Rgb24> img;
+            public BufferBlock<float[]> buf;
+            public ToTransform(Image<Rgb24> i, BufferBlock<float[]> b)
+            {
+                img = i;
+                buf = b;
+            }
+        }
+        private struct ToAction
+        {
+            public List<NamedOnnxValue> list;
+            public BufferBlock<float[]> buf;
+            public ToAction (List<NamedOnnxValue> l, BufferBlock<float[]> b)
+            {
+                list = l;
+                buf = b;
+            }
+        }
 
-        public EmotionFP()
+        public EmotionFP(CancellationToken token)
         {
             using var modelStream = typeof(EmotionFP).Assembly.GetManifestResourceStream("NuGetEmotionFP.emotion-ferplus-7.onnx");
             using var memoryStream = new MemoryStream();
             modelStream.CopyTo(memoryStream);
             this.session = new InferenceSession(memoryStream.ToArray());
-            /*try
+
+            this.ImgTransform = new TransformBlock<ToTransform, ToAction>(async tr =>
+             {
+                 return await Task<ToAction>.Factory.StartNew(() =>
+                 {
+                     //Console.WriteLine("---Start");
+                     token.ThrowIfCancellationRequested();
+                     tr.img.Mutate(ctx => { ctx.Resize(new Size(64, 64)); });
+                     var inp = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("Input3", GrayscaleImageToTensor(tr.img)) };
+                     ToAction act = new ToAction(inp, tr.buf);
+                     //Console.WriteLine("---Finish");
+                     return act;
+                 });
+             }, new ExecutionDataflowBlockOptions()
+             {
+                 MaxDegreeOfParallelism = Environment.ProcessorCount,
+                 CancellationToken = token
+             });
+
+ 
+            this.ImgAction = new ActionBlock<ToAction>(act =>
             {
-                using var modelStream = typeof(EmotionFP).Assembly.GetManifestResourceStream("NuGetEmotionFP.emotion-ferplus-7.onnx");
-                using var memoryStream = new MemoryStream();
-                modelStream.CopyTo(memoryStream);
-                this.session = new InferenceSession(memoryStream.ToArray());
-            }
-            catch(Exception e)
+                //Console.WriteLine("###Start");
+                IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results;
+                token.ThrowIfCancellationRequested();
+                results = session.Run(act.list);
+                float[] f = Softmax(results.First(v => v.Name == "Plus692_Output_0").AsEnumerable<float>().ToArray());
+                act.buf.Post(f);
+                //Console.WriteLine("###Finish");
+                }, new ExecutionDataflowBlockOptions
             {
-                if (e.Source != null)
-                    Console.WriteLine("IOException source: {0}", e.Message);
-                else Console.WriteLine("-");
-            }*/
+                MaxDegreeOfParallelism = 1,
+                CancellationToken = token
+            });
         }
 
 
-        public void GE(Image<Rgb24> img, BufferBlock<float[]> bufferblock, CancellationToken token)
+        public void GetEmotions(Image<Rgb24> img, BufferBlock<float[]> bufferblock)
         {
             if (img == null)
             {
@@ -52,55 +95,18 @@ namespace NuGetEmotionFP
             }
             try
             {
-                var input = new BufferBlock<Image<Rgb24>>();
-                input.Post(img);
-                var t1 = new TransformBlock<Image<Rgb24>, List<NamedOnnxValue>>(async img =>
-                {
-                    return await Task<List<NamedOnnxValue>>.Factory.StartNew(() =>
-                        {
-                            token.ThrowIfCancellationRequested();
-                            img.Mutate(ctx => { ctx.Resize(new Size(64, 64)); });
-                            var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("Input3", GrayscaleImageToTensor(img)) };
-                            return inputs;
-                        });
-                }, new ExecutionDataflowBlockOptions()
-                {
-                    MaxDegreeOfParallelism = Environment.ProcessorCount,
-                    CancellationToken = token
-                });
-
-
-                var t2 = new ActionBlock<List<NamedOnnxValue>>(async inputs =>
-                {
-                    await Task.Factory.StartNew(() =>
-                    {
-                        IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results;
-                        token.ThrowIfCancellationRequested();
-                        lock (obj)
-                        {
-                            results = session.Run(inputs);
-                        }
-
-                        float[] f = results.First(v => v.Name == "Plus692_Output_0").AsEnumerable<float>().ToArray();
-                        bufferblock.Post(f);
-                    });
-                }, new ExecutionDataflowBlockOptions
-                {
-                    MaxDegreeOfParallelism = 1,
-                    CancellationToken = token
-                });
-
-                input.LinkTo(t1, new DataflowLinkOptions()
+                ToTransform t = new ToTransform(img, bufferblock);
+                input.Post(t);
+                
+                input.LinkTo(ImgTransform, new DataflowLinkOptions()
                 {
                     PropagateCompletion = true
                 });
 
-                t1.LinkTo(t2, new DataflowLinkOptions()
+                ImgTransform.LinkTo(ImgAction, new DataflowLinkOptions()
                 {
                     PropagateCompletion = true
                 });
-
-                input.Complete();
             }
             catch (Exception e)
             {
@@ -142,6 +148,7 @@ namespace NuGetEmotionFP
 
         public void Dispose()
         {
+            input.Complete();
             session.Dispose();
         }
         

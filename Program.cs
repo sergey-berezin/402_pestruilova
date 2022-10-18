@@ -15,47 +15,54 @@ img[1] = image2;
 img[2] = image3;
 img[3] = image4;
 
-EmotionFP em = new EmotionFP();
-
-var buffer = new BufferBlock<float[]>();
-
 CancellationTokenSource source = new CancellationTokenSource();
 CancellationToken token = source.Token;
+
+EmotionFP em = new EmotionFP(token);
 
 string[] keys = { "neutral", "happiness", "surprise", "sadness", "anger", "disgust", "fear", "contempt" };
 
 Console.WriteLine("\n############-Test1-############");
 
-em.GE(image1, buffer, token);
-float[] emotions = buffer.Receive();
+var buffer1_1 = new BufferBlock<float[]>();
+em.GetEmotions(image1, buffer1_1);
+float[] emotions1 = buffer1_1.Receive();
 Console.WriteLine("\n---face1---");
-foreach (var i in keys.Zip(emotions))
+foreach (var i in keys.Zip(emotions1))
     Console.WriteLine($"{i.First}: {i.Second}");
 
-
-em.GE(image2, buffer, token);
-float[] emotions2 = buffer.Receive();
+var buffer1_2 = new BufferBlock<float[]>();
+em.GetEmotions(image2, buffer1_2);
+float[] emotions2 = buffer1_2.Receive();
 Console.WriteLine("\n---face2---");
 foreach (var i in keys.Zip(emotions2))
     Console.WriteLine($"{i.First}: {i.Second}");
 
 Console.WriteLine("\n############-Test2-############");
 
-var buf = new BufferBlock<float[]>();
-
+BufferBlock<float[]>[] buffer2 = new BufferBlock<float[]>[4];
+for(int i = 0; i < 4; i++)
+{
+    buffer2[i] = new BufferBlock<float[]>();
+}
 Parallel.For(0, 4, i => {
-    em.GE(img[i], buffer, token);
-    float[] emotions = buffer.Receive();
-    Console.WriteLine($"\n---face{i+1}---");
+    
+    em.GetEmotions(img[i], buffer2[i]);
+});
+for (int i = 0; i < 4; i++)
+{
+    float[] emotions = buffer2[i].Receive();
+    Console.WriteLine($"\n---face{i + 1}---");
     foreach (var j in keys.Zip(emotions))
         Console.WriteLine($"{j.First}: {j.Second}");
-});
+}
 
 Console.WriteLine("\n############-Test3-############");
 
 Image<Rgb24>? image0 = null;
-em.GE(image0, buffer, token);
-float[] emotions3 = buffer.Receive();
+var buffer3 = new BufferBlock<float[]>();
+em.GetEmotions(image0, buffer3);
+float[] emotions3 = buffer3.Receive();
 Console.WriteLine("\n---face0---");
 foreach (var i in keys.Zip(emotions3))
     Console.WriteLine($"{i.First}: {i.Second}");
